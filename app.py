@@ -7,6 +7,7 @@ import ta
 import sqlite3
 from datetime import datetime, timedelta
 from plotly.subplots import make_subplots
+import dash_bootstrap_components as dbc
 
 # Initialize the Dash app with callback exception suppression
 app = dash.Dash(__name__, suppress_callback_exceptions=True)
@@ -99,6 +100,68 @@ app.layout = html.Div([
                    style={'backgroundColor': '#4CAF50', 'color': 'white', 'padding': '10px 20px'})
     ], style={'margin': '20px', 'textAlign': 'center'}),
     
+    # Add Criteria Form
+    html.Div([
+        html.H3('Filter Criteria'),
+        dbc.Row([
+            # Price Criteria
+            dbc.Col([
+                html.H5('Price Filters'),
+                dbc.Input(id='min-price', placeholder='Min Price', type='number'),
+                dbc.Input(id='max-price', placeholder='Max Price', type='number'),
+            ], width=3),
+            
+            # Volume Criteria
+            dbc.Col([
+                html.H5('Volume Filters'),
+                dbc.Input(id='min-volume', placeholder='Min Volume', type='number'),
+                dbc.Input(id='max-volume', placeholder='Max Volume', type='number'),
+            ], width=3),
+            
+            # Technical Indicators
+            dbc.Col([
+                html.H5('Technical Indicators'),
+                dcc.Dropdown(
+                    id='sma-condition',
+                    options=[
+                        {'label': 'Price > SMA20', 'value': 'above_sma20'},
+                        {'label': 'Price < SMA20', 'value': 'below_sma20'},
+                        {'label': 'Price > SMA50', 'value': 'above_sma50'},
+                        {'label': 'Price < SMA50', 'value': 'below_sma50'},
+                        {'label': 'SMA20 crosses above SMA50', 'value': 'golden_cross'},
+                        {'label': 'SMA20 crosses below SMA50', 'value': 'death_cross'}
+                    ],
+                    multi=True,
+                    placeholder='Select SMA Conditions'
+                ),
+                dcc.RangeSlider(
+                    id='rsi-range',
+                    min=0,
+                    max=100,
+                    step=1,
+                    marks={0: '0', 30: '30', 70: '70', 100: '100'},
+                    value=[30, 70],
+                    tooltip={"placement": "bottom", "always_visible": True}
+                ),
+                html.Div(id='rsi-range-output'),
+                dcc.Dropdown(
+                    id='macd-condition',
+                    options=[
+                        {'label': 'MACD above Signal', 'value': 'macd_above'},
+                        {'label': 'MACD below Signal', 'value': 'macd_below'},
+                        {'label': 'MACD Crossover', 'value': 'macd_cross_above'},
+                        {'label': 'MACD Crossunder', 'value': 'macd_cross_below'}
+                    ],
+                    multi=True,
+                    placeholder='Select MACD Conditions'
+                )
+            ], width=6)
+        ]),
+        html.Button('Apply Filters', id='apply-filters', n_clicks=0,
+                   style={'backgroundColor': '#2196F3', 'color': 'white', 
+                          'padding': '10px 20px', 'margin': '20px'})
+    ], style={'margin': '20px', 'padding': '20px', 'border': '1px solid #ddd', 'borderRadius': '5px'}),
+    
     # Results table
     html.Div([
         dash_table.DataTable(
@@ -119,7 +182,7 @@ app.layout = html.Div([
                 'cursor': 'pointer'
             },
             style_table={
-                'height': '300px',  # Set fixed height
+                'height': '300px', 
                 'overflowY': 'scroll',  # Enable vertical scrolling
                 'overflowX': 'auto'    # Enable horizontal scrolling if needed
             },
@@ -157,51 +220,104 @@ app.layout = html.Div([
 # Callback for scanning stocks and updating the table
 @app.callback(
     Output('stocks-table', 'data'),
-    Input('scan-button', 'n_clicks')
+    [Input('scan-button', 'n_clicks'),
+     Input('apply-filters', 'n_clicks')],
+    [State('min-price', 'value'),
+     State('max-price', 'value'),
+     State('min-volume', 'value'),
+     State('max-volume', 'value'),
+     State('sma-condition', 'value'),
+     State('rsi-range', 'value'),
+     State('macd-condition', 'value')]
 )
-def scan_stocks(n_clicks):
-    if n_clicks == 0:
+def scan_stocks(scan_clicks, filter_clicks, min_price, max_price, 
+                min_volume, max_volume, sma_conditions, rsi_range, 
+                macd_conditions):
+    if scan_clicks == 0:
         return []
     
     conn = sqlite3.connect('Equity.db')
     try:
-        # Get unique tickers
+        # Build the query based on filters
         query = """
-        SELECT DISTINCT Ticker
-        FROM EquityDailyPrice
+        WITH LatestPrices AS (
+            SELECT 
+                e.*,
+                LAG(Close, 1) OVER (PARTITION BY Ticker ORDER BY AsOfDate) as prev_close,
+                LAG(Close, 20) OVER (PARTITION BY Ticker ORDER BY AsOfDate) as sma20,
+                LAG(Close, 50) OVER (PARTITION BY Ticker ORDER BY AsOfDate) as sma50
+            FROM EquityDailyPrice e
+            WHERE AsOfDate >= date('now', '-60 days')
+        )
+        SELECT DISTINCT
+            Ticker, AsOfDate as Date, Open, High, Low, Close, Volume
+        FROM LatestPrices
+        WHERE 1=1
         """
-        tickers = pd.read_sql_query(query, conn)
         
-        results = []
-        for ticker in tickers['Ticker']:
-            # Get latest data for each ticker
-            query = """
-            SELECT Ticker, AsOfDate as Date, Open, High, Low, Close, Volume
-            FROM EquityDailyPrice
-            WHERE Ticker = ?
-            ORDER BY AsOfDate DESC
-            LIMIT 1
-            """
-            df = pd.read_sql_query(query, conn, params=(ticker,))
+        params = []
+        if min_price is not None:
+            query += " AND Close >= ?"
+            params.append(min_price)
+        if max_price is not None:
+            query += " AND Close <= ?"
+            params.append(max_price)
+        if min_volume is not None:
+            query += " AND Volume >= ?"
+            params.append(min_volume)
+        if max_volume is not None:
+            query += " AND Volume <= ?"
+            params.append(max_volume)
             
-            if not df.empty:
-                row = df.iloc[0]
-                results.append({
-                    'Date': row['Date'],
-                    'Ticker': row['Ticker'],
-                    'Open': row['Open'],
-                    'High': row['High'],
-                    'Low': row['Low'],
-                    'Close': row['Close'],
-                    'Volume': row['Volume']
-                })
+        query += " ORDER BY AsOfDate DESC"
         
+        df = pd.read_sql_query(query, conn, params=params)
+        
+        # Apply technical indicator filters in Python
+        if sma_conditions or rsi_range or macd_conditions:
+            df = apply_technical_filters(df, sma_conditions, rsi_range, macd_conditions)
+        
+        results = df.to_dict('records')
         return results
+        
     except Exception as e:
         print(f"Error in scan_stocks: {str(e)}")
         return []
     finally:
         conn.close()
+
+def apply_technical_filters(df, sma_conditions, rsi_range, macd_conditions):
+    # Calculate technical indicators
+    if len(df) > 0:
+        df['SMA20'] = df.groupby('Ticker')['Close'].transform(lambda x: x.rolling(window=20).mean())
+        df['SMA50'] = df.groupby('Ticker')['Close'].transform(lambda x: x.rolling(window=50).mean())
+        df['RSI'] = df.groupby('Ticker')['Close'].transform(lambda x: ta.momentum.rsi(x, window=14))
+        
+        macd = ta.trend.MACD(df['Close'])
+        df['MACD'] = macd.macd()
+        df['MACD_Signal'] = macd.macd_signal()
+        
+        # Apply filters
+        if sma_conditions:
+            for condition in sma_conditions:
+                if condition == 'above_sma20':
+                    df = df[df['Close'] > df['SMA20']]
+                elif condition == 'below_sma20':
+                    df = df[df['Close'] < df['SMA20']]
+                # Add other SMA conditions...
+                
+        if rsi_range:
+            df = df[(df['RSI'] >= rsi_range[0]) & (df['RSI'] <= rsi_range[1])]
+            
+        if macd_conditions:
+            for condition in macd_conditions:
+                if condition == 'macd_above':
+                    df = df[df['MACD'] > df['MACD_Signal']]
+                elif condition == 'macd_below':
+                    df = df[df['MACD'] < df['MACD_Signal']]
+                # Add other MACD conditions...
+    
+    return df
 
 # Callback for displaying stock chart
 @app.callback(
